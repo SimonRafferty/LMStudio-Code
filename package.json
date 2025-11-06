@@ -1,0 +1,41 @@
+{
+  "name": "lmstudio-context-manager",
+  "version": "1.0.0",
+  "description": "Context management wrapper for LMStudio with intelligent code search and task tracking",
+  "main": "src/index.js",
+  "type": "module",
+  "bin": {
+    "lmcode": "./src/index.js"
+  },
+  "scripts": {
+    "start": "node src/index.js start",
+    "index": "node src/index.js index",
+    "tasks": "node src/index.js tasks",
+    "history": "node src/index.js history",
+    "config": "node src/index.js config"
+  },
+  "keywords": [
+    "lmstudio",
+    "context-management",
+    "llm",
+    "ai",
+    "code-assistant"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic-ai/tokenizer": "^0.0.4",
+    "acorn": "^8.11.0",
+    "acorn-walk": "^8.3.0",
+    "axios": "^1.6.0",
+    "chalk": "^5.3.0",
+    "clipboardy": "^5.0.0",
+    "commander": "^11.0.0",
+    "inquirer": "^9.0.0",
+    "ora": "^7.0.0",
+    "tiktoken": "^1.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

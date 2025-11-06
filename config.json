@@ -1,0 +1,37 @@
+{
+  "lmstudio": {
+    "baseURL": "http://localhost:1234/v1",
+    "model": "local-model",
+    "temperature": 0.7,
+    "maxTokens": 4096
+  },
+  "contextManagement": {
+    "maxContextTokens": 3500,
+    "compressionThreshold": 0.7,
+    "recentMessagesCount": 5,
+    "maxFilesInContext": 5
+  },
+  "search": {
+    "snippetContextLines": 3,
+    "editContextLines": 25,
+    "functionContextLines": 50,
+    "smallFileThreshold": 500,
+    "maxSearchResults": 5,
+    "maxSnippetsPerFile": 3
+  },
+  "editTrack": {
+    "enabled": true,
+    "useForFilesLargerThan": 300,
+    "alwaysUseForEdits": false
+  },
+  "codebase": {
+    "rootPath": "./",
+    "excludePatterns": ["node_modules", ".git", "dist", "build", "data", ".lmcode"],
+    "excludeExtensions": [".exe", ".dll", ".so", ".dylib", ".bin", ".zip", ".tar", ".gz", ".rar", ".7z", ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".svg", ".mp3", ".mp4", ".wav", ".avi", ".mov", ".mkv", ".obj", ".o", ".a", ".lib", ".pyc", ".class", ".jar"]
+  },
+  "prompts": {
+    "mode": "normal",
+    "systemPromptPath": "./templates/system_prompt.txt",
+    "tersePromptPath": "./templates/system_prompt_terse.txt"
+  }
+}
