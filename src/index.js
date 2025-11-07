@@ -1035,13 +1035,26 @@ Add your custom instructions for the LLM here. This file works like Claude's CLA
           }
 
           // Display the final response
-          console.log(chalk.cyan('\n'));
+          console.log(chalk.cyan('\nAssistant:'));
           if (finalParsed.plainText) {
             console.log(finalParsed.plainText);
           }
 
-          // Use finalParsed for actions
-          parsed = finalParsed;
+          // Use finalParsed for actions (but ignore additional searches/requests from follow-up)
+          // Only allow file operations and task updates from follow-up
+          parsed = {
+            plainText: finalParsed.plainText,
+            fileEdits: finalParsed.fileEdits || [],
+            fileCreates: finalParsed.fileCreates || [],
+            fileDeletes: finalParsed.fileDeletes || [],
+            taskUpdates: finalParsed.taskUpdates || [],
+            searches: [], // Ignore searches from follow-up
+            readLines: [], // Ignore read requests from follow-up
+            webSearches: [], // Ignore web searches from follow-up
+            webFetches: [], // Ignore web fetches from follow-up
+            questions: finalParsed.questions || []
+          };
+
           // Extract text content from follow-up response
           currentResponse = followUpResponse.type === 'content'
             ? followUpResponse.content
