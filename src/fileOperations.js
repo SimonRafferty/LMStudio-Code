@@ -101,9 +101,19 @@ class FileOperations {
       const content = await this.readFile(filePath);
 
       if (!content.includes(oldText)) {
+        // Debug: Show why the match failed
+        const oldTextPreview = oldText.length > 200
+          ? oldText.substring(0, 200) + '...[truncated]'
+          : oldText;
+        const oldTextLength = oldText.length;
+        const fileLength = content.length;
+
         throw new Error(
-          `Text to replace not found in ${filePath}. ` +
-          `Make sure the old text exactly matches the file content.`
+          `Text to replace not found in ${filePath}.\n` +
+          `  Old text length: ${oldTextLength} chars\n` +
+          `  File length: ${fileLength} chars\n` +
+          `  Old text preview: ${oldTextPreview}\n` +
+          `  Make sure the old text exactly matches the file content (including whitespace).`
         );
       }
 

@@ -93,9 +93,10 @@ class ContextManager {
   /**
    * Compress conversation history
    * @param {number} keepRecentCount - Number of recent messages to keep uncompressed
+   * @param {Function} onProgress - Optional progress callback
    * @returns {Promise<void>}
    */
-  async compressHistory(keepRecentCount = 5) {
+  async compressHistory(keepRecentCount = 5, onProgress = null) {
     if (this.history.full.length <= keepRecentCount) {
       // Not enough messages to compress
       return;
@@ -126,7 +127,7 @@ Omit: greetings, unnecessary explanations, verbose discussions.
 Format as bullet points, grouped by topic.`;
 
     try {
-      const compressed = await this.lmstudioClient.compress(conversationText, compressionPrompt);
+      const compressed = await this.lmstudioClient.compress(conversationText, compressionPrompt, onProgress);
 
       // Update history structure
       if (this.history.compressed) {

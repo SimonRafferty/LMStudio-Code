@@ -21,6 +21,7 @@ import ContextManager from './contextManager.js';
 import CodebaseIndexer from './codebaseIndexer.js';
 import ResponseParser from './responseParser.js';
 import PromptBuilder from './promptBuilder.js';
+import WebScraper from './webScraper.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -34,7 +35,6 @@ function getDefaultConfig() {
       baseURL: 'http://localhost:1234/v1',
       model: 'local-model',
       temperature: 0.7,
-      maxTokens: 4096,
     },
     contextManagement: {
       maxContextTokens: 3500,
@@ -91,6 +91,7 @@ class LMStudioContextManager {
     this.components.tokenCounter = new TokenCounter();
     this.components.lmstudioClient = new LMStudioClient(this.config.lmstudio);
     this.components.fileOps = new FileOperations(this.projectRoot);
+    this.components.webScraper = new WebScraper();
 
     const taskPath = path.join(this.lmcodeDir, 'task_list.json');
     this.components.taskManager = new TaskManager(taskPath, this.components.fileOps);
@@ -160,7 +161,10 @@ class LMStudioContextManager {
         const spinner = ora(`Compressing history (${currentTokens}/${contextWindow} tokens)...`).start();
 
         await this.components.contextManager.compressHistory(
-          this.config.contextManagement.recentMessagesCount
+          this.config.contextManagement.recentMessagesCount,
+          (tokens, text) => {
+            spinner.text = `Compressing history... (${tokens} tokens generated)`;
+          }
         );
         await this.saveState();
 
@@ -344,9 +348,28 @@ Add your custom instructions for the LLM here. This file works like Claude's CLA
 
       const contextWindow = this.components.lmstudioClient.getContextWindow();
       const modelName = this.components.lmstudioClient.model;
-      spinner.succeed(`Connected to LMStudio (context: ${contextWindow} tokens, model: ${modelName})`);
+      const toolsEnabled = this.components.lmstudioClient.supportsTools;
 
-      return true;
+      // Build connection message
+      let connectionMsg = `Connected to LMStudio (model: ${modelName}`;
+      if (contextWindow) {
+        connectionMsg += `, context: ${contextWindow} tokens`;
+      }
+      connectionMsg += `, mode: ${toolsEnabled ? chalk.green('Function Calling') : chalk.yellow('XML')}`;
+      connectionMsg += ')';
+
+      if (contextWindow) {
+        spinner.succeed(connectionMsg);
+        return true;
+      } else {
+        spinner.warn(connectionMsg);
+        console.log(chalk.yellow('\n⚠ Context window could not be determined from API'));
+        console.log(chalk.white('Please set the context length manually using:'));
+        console.log(chalk.cyan('  /context <number>'));
+        console.log(chalk.gray('\nExample: /context 4096'));
+        console.log(chalk.gray('You can find your model\'s context length in LM Studio\'s model info.\n'));
+        return 'no-context';
+      }
     } catch (error) {
       spinner.fail('Failed to connect to LMStudio');
       console.error(chalk.red(error.message));
@@ -359,12 +382,19 @@ Add your custom instructions for the LLM here. This file works like Claude's CLA
    * @param {string} prompt - The prompt message
    * @returns {Promise<string>} - The user input
    */
-  async customInput(prompt) {
-    return new Promise((resolve) => {
+  async customInput(prompt, options = {}) {
+    return new Promise((resolve, reject) => {
       let input = '';
       let cursorPos = 0; // Position in the input string
       const promptLength = prompt.replace(/\x1b\[[0-9;]*m/g, '').length; // Strip ANSI codes for length
       const terminalWidth = process.stdout.columns || 80;
+      let currentNumLines = 1; // Track current number of lines being used
+
+      // Display separator line above prompt if requested
+      if (options.showSeparator !== false) {
+        const separator = chalk.gray('─'.repeat(Math.min(terminalWidth, 80)));
+        process.stdout.write(separator + '\n');
+      }
 
       // Display the prompt
       process.stdout.write(prompt);
@@ -388,38 +418,60 @@ Add your custom instructions for the LLM here. This file works like Claude's CLA
       const redrawInput = () => {
         // Calculate how many lines the current input takes
         const totalLength = promptLength + input.length;
-        const numLines = Math.ceil(totalLength / terminalWidth);
+        const newNumLines = Math.max(1, Math.ceil(totalLength / terminalWidth));
 
-        // Move cursor to start of first line and clear everything
-        if (numLines > 1) {
-          // Move cursor up to the first line
-          process.stdout.write(`\x1b[${numLines - 1}A`);
+        // Save cursor position if we need to move up multiple lines
+        const linesToMoveUp = currentNumLines - 1;
+
+        // Move cursor to start of first line (where prompt begins)
+        if (linesToMoveUp > 0) {
+          process.stdout.write(`\x1b[${linesToMoveUp}A`); // Move up to first line
         }
-        // Move to start of line
+
+        // Move to start of line and clear from cursor down
         readline.cursorTo(process.stdout, 0);
-        // Clear from cursor to end of screen
         readline.clearScreenDown(process.stdout);
 
         // Redraw prompt and input
         process.stdout.write(prompt + input);
 
-        // Position cursor at the correct location
-        const absolutePos = promptLength + cursorPos;
-        const line = Math.floor(absolutePos / terminalWidth);
-        const col = absolutePos % terminalWidth;
+        // Update tracked line count
+        currentNumLines = newNumLines;
 
-        // Move cursor to correct position
-        if (line > 0) {
-          process.stdout.write(`\x1b[${line}A`); // Move up if needed
+        // Calculate cursor position
+        const absolutePos = promptLength + cursorPos;
+        const targetLine = Math.floor(absolutePos / terminalWidth);
+        const targetCol = absolutePos % terminalWidth;
+
+        // Move cursor to correct line (we're currently at end of input)
+        // We need to move from the last line of input to the target line
+        const currentLine = newNumLines - 1;
+        const lineDiff = currentLine - targetLine;
+
+        if (lineDiff > 0) {
+          // Move up
+          process.stdout.write(`\x1b[${lineDiff}A`);
+        } else if (lineDiff < 0) {
+          // Move down
+          process.stdout.write(`\x1b[${-lineDiff}B`);
         }
-        readline.cursorTo(process.stdout, col);
+
+        // Set column position
+        readline.cursorTo(process.stdout, targetCol);
       };
 
       const onData = async (key) => {
         const code = key.charCodeAt(0);
 
-        // Ctrl+C - exit
-        if (code === 3) {
+        // ESC key - cancel input
+        if (key === '\x1b' || key === '\x1b\x1b') {
+          cleanup();
+          process.stdout.write('\n');
+          reject(new Error('INPUT_CANCELLED'));
+          return;
+        }
+        // Ctrl+C - exit application
+        else if (code === 3) {
           cleanup();
           console.log('^C');
           process.exit(0);
@@ -445,6 +497,11 @@ Add your custom instructions for the LLM here. This file works like Claude's CLA
         else if (code === 13) {
           cleanup();
           process.stdout.write('\n');
+          // Display separator line below input if requested
+          if (options.showSeparator !== false) {
+            const separator = chalk.gray('─'.repeat(Math.min(terminalWidth, 80)));
+            process.stdout.write(separator + '\n');
+          }
           resolve(input.trim());
         }
         // Backspace
@@ -504,12 +561,16 @@ Add your custom instructions for the LLM here. This file works like Claude's CLA
    */
   async startInteractive() {
     console.log(chalk.cyan('\n=== Interactive Mode ==='));
-    console.log(chalk.gray('Type your questions or commands. Use /help for available commands.\n'));
+    console.log(chalk.gray('Type your questions or commands. Use /help for available commands.'));
+    console.log(chalk.gray('Press ESC to cancel during LLM generation.\n'));
 
     // Check connection
-    const connected = await this.testConnection();
-    if (!connected) {
+    const connectionStatus = await this.testConnection();
+    if (connectionStatus === false) {
       console.log(chalk.yellow('\nContinuing anyway (you can still use local commands)...\n'));
+    } else if (connectionStatus === 'no-context') {
+      // Context window not available - block prompts until set
+      console.log(chalk.yellow('LLM queries are blocked until context length is set.\n'));
     } else {
       // Check if context needs compression on startup
       await this.checkAndCompressContext();
@@ -517,7 +578,20 @@ Add your custom instructions for the LLM here. This file works like Claude's CLA
 
     // Main interaction loop
     while (true) {
-      const input = await this.customInput(chalk.green('You: '));
+      let input;
+      try {
+        input = await this.customInput(chalk.green('You: '));
+      } catch (error) {
+        if (error.message === 'INPUT_CANCELLED') {
+          // User pressed ESC - cancel any ongoing request
+          if (this.currentAbortController) {
+            this.currentAbortController.abort();
+            console.log(chalk.yellow('\n✗ Request cancelled\n'));
+          }
+          continue;
+        }
+        throw error; // Re-throw other errors
+      }
 
       const trimmedInput = input.trim();
 
@@ -527,6 +601,14 @@ Add your custom instructions for the LLM here. This file works like Claude's CLA
       if (trimmedInput.startsWith('/')) {
         const shouldContinue = await this.handleCommand(trimmedInput);
         if (!shouldContinue) break;
+        continue;
+      }
+
+      // Block prompts if context not set
+      const contextWindow = this.components.lmstudioClient.getContextWindow();
+      if (!contextWindow) {
+        console.log(chalk.red('\n✗ Context window not set. Please use /context command first.\n'));
+        console.log(chalk.gray('Example: /context 4096\n'));
         continue;
       }
 
@@ -568,6 +650,14 @@ Add your custom instructions for the LLM here. This file works like Claude's CLA
 
       case 'config':
         this.showConfig();
+        break;
+
+      case 'context':
+        await this.setContextLength(args);
+        break;
+
+      case 'tools':
+        await this.toggleTools(args);
         break;
 
       case 'stats':
@@ -677,32 +767,177 @@ Add your custom instructions for the LLM here. This file works like Claude's CLA
   }
 
   /**
+   * Setup ESC key listener for cancellation during processing
+   */
+  setupCancellationListener(abortController) {
+    if (!process.stdin.isTTY) return null;
+
+    const onKeyPress = (data) => {
+      // ESC key - just abort, let error handling deal with cleanup
+      if (data === '\x1b' || data === '\x1b\x1b') {
+        abortController.abort();
+      }
+    };
+
+    // Set up raw mode to capture ESC key
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', onKeyPress);
+
+    // Return cleanup function
+    return () => {
+      process.stdin.removeListener('data', onKeyPress);
+      // Don't pause stdin - let customInput handle stdin setup
+      // Just disable raw mode so normal input can work
+      if (process.stdin.isTTY) {
+        process.stdin.setRawMode(false);
+      }
+    };
+  }
+
+  /**
    * Process user query with LLM
    */
   async processQuery(query) {
-    const spinner = ora('Thinking...').start();
+    const spinner = ora('Thinking... (press ESC to cancel)').start();
+    const abortController = new AbortController();
+    const cleanup = this.setupCancellationListener(abortController);
 
     try {
       // Build prompt
       const prompt = await this.components.promptBuilder.buildPrompt(query);
 
       // Show token info
-      spinner.text = `Thinking... (${prompt.metadata.totalTokens} tokens)`;
+      spinner.text = `Thinking... (${prompt.metadata.totalTokens} tokens, press ESC to cancel)`;
 
       // Get LLM response with dynamic max_tokens to prevent truncation
       const response = await this.components.lmstudioClient.complete(prompt.messages, {
         promptTokens: prompt.metadata.totalTokens,
+        forceTools: true, // Force Qwen3 models to use tools instead of just outputting text
+        signal: abortController.signal,
+        onProgress: (tokens, text) => {
+          spinner.text = `Generating response... (${tokens} tokens, press ESC to cancel)`;
+        },
       });
 
       spinner.stop();
 
-      // Parse response
-      let parsed = this.components.responseParser.parseResponse(response);
-      let currentResponse = response;
+      // Handle structured response format (tool calls or content)
+      let parsed;
+      let currentResponse;
 
-      // Handle searches and read_lines requests (may need multiple rounds)
-      let hasRequests = (parsed.searches && parsed.searches.length > 0) ||
-                        (parsed.readLines && parsed.readLines.length > 0);
+      if (response.type === 'tool_calls') {
+
+        try {
+          // Import tool parsing functions
+          const { parseToolCalls } = await import('./tools.js');
+
+          // Parse tool calls
+          const toolCalls = parseToolCalls(response);
+          console.log(chalk.cyan(`\n🔧 Model requesting ${toolCalls.length} tool call(s)...`));
+
+          // Execute tools and collect results as "tool" role messages
+          const toolMessages = [];
+
+          for (const toolCall of toolCalls) {
+            console.log(chalk.gray(`  → ${toolCall.name}(${JSON.stringify(toolCall.arguments).substring(0, 60)}...)`));
+
+            let toolResult = '';
+
+            try {
+              // Execute the tool based on its name
+              switch (toolCall.name) {
+                case 'search_code':
+                  const keywords = toolCall.arguments.keywords || [];
+                  const searchResults = await this.performSearch(keywords);
+                  toolResult = searchResults || 'No results found';
+                  break;
+
+                case 'read_file_lines':
+                  const lineResults = await this.handleReadLines([{
+                    path: toolCall.arguments.path,
+                    startLine: toolCall.arguments.start_line,
+                    endLine: toolCall.arguments.end_line
+                  }]);
+                  toolResult = lineResults || 'Failed to read lines';
+                  break;
+
+                default:
+                  toolResult = `Tool ${toolCall.name} not implemented for execution`;
+              }
+            } catch (error) {
+              toolResult = `Error executing ${toolCall.name}: ${error.message}`;
+            }
+
+            // Add tool result as "tool" role message (per LM Studio docs)
+            toolMessages.push({
+              role: 'tool',
+              tool_call_id: toolCall.id,
+              name: toolCall.name,
+              content: toolResult
+            });
+          }
+
+          // Now call model again WITHOUT tools parameter to get final response
+          console.log(chalk.cyan('\n💭 Processing tool results...'));
+
+          // Build messages array: original prompt + assistant tool calls + tool results
+          const followUpMessages = [
+            ...prompt.messages,
+            response.message, // Assistant's message with tool_calls
+            ...toolMessages   // Tool execution results
+          ];
+
+          const finalSpinner = ora('Generating final response...').start();
+
+          const finalResponse = await this.components.lmstudioClient.complete(followUpMessages, {
+            disableTools: true, // CRITICAL: Don't send tools in follow-up
+            onProgress: (tokens, text) => {
+              finalSpinner.text = `Generating final response... (${tokens} tokens generated)`;
+            },
+          });
+
+          finalSpinner.stop();
+
+          // Parse the final response (should be content or XML, not more tool calls)
+          if (finalResponse.type === 'content') {
+            currentResponse = finalResponse.content;
+            parsed = this.components.responseParser.parseResponse(currentResponse);
+          } else {
+            // Shouldn't happen, but handle it
+            console.warn(chalk.yellow('Warning: Got tool_calls in follow-up response'));
+            currentResponse = finalResponse.message?.content || '';
+            parsed = this.components.responseParser.parseResponse(currentResponse);
+          }
+
+          // Display the assistant's response
+          console.log(chalk.cyan('\nAssistant:'));
+          if (parsed.plainText) {
+            console.log(parsed.plainText);
+          }
+
+        } catch (error) {
+          console.error(chalk.red(`\n[ERROR] Failed to handle tool calls: ${error.message}`));
+          console.log(chalk.yellow('Falling back to XML parsing...'));
+          // Fall back to XML parsing
+          currentResponse = response.message?.content || '';
+          parsed = this.components.responseParser.parseResponse(currentResponse);
+        }
+      } else {
+        // Regular text response - parse XML as before
+        currentResponse = response.content;
+        parsed = this.components.responseParser.parseResponse(currentResponse);
+      }
+
+      // Handle searches, read_lines, web searches, and web fetches for XML mode only
+      // (Tool call mode already handled this above)
+      let hasRequests = response.type !== 'tool_calls' && (
+        (parsed.searches && parsed.searches.length > 0) ||
+        (parsed.readLines && parsed.readLines.length > 0) ||
+        (parsed.webSearches && parsed.webSearches.length > 0) ||
+        (parsed.webFetches && parsed.webFetches.length > 0)
+      );
 
       if (hasRequests) {
         console.log(chalk.cyan('\nAssistant:'));
@@ -712,7 +947,7 @@ Add your custom instructions for the LLM here. This file works like Claude's CLA
 
         let additionalContext = '';
 
-        // Handle search requests
+        // Handle codebase search requests
         if (parsed.searches && parsed.searches.length > 0) {
           const searchResults = await this.performSearch(parsed.searches);
           if (searchResults) {
@@ -727,6 +962,36 @@ Add your custom instructions for the LLM here. This file works like Claude's CLA
           additionalContext += lineResults;
         }
 
+        // Handle web search requests
+        if (parsed.webSearches && parsed.webSearches.length > 0) {
+          for (const query of parsed.webSearches) {
+            console.log(chalk.cyan(`\n🌐 Searching web for: ${query}`));
+            try {
+              const results = await this.components.webScraper.searchWeb(query);
+              const formatted = this.components.webScraper.formatSearchResults(results);
+              additionalContext += `\n\nWEB SEARCH RESULTS FOR "${query}":\n${formatted}\n`;
+            } catch (error) {
+              console.log(chalk.red(`  ✗ Web search failed: ${error.message}`));
+              additionalContext += `\n\nWEB SEARCH FAILED: ${error.message}\n`;
+            }
+          }
+        }
+
+        // Handle web fetch requests
+        if (parsed.webFetches && parsed.webFetches.length > 0) {
+          for (const url of parsed.webFetches) {
+            console.log(chalk.cyan(`\n🌐 Fetching web page: ${url}`));
+            try {
+              const pageData = await this.components.webScraper.fetchWebPage(url);
+              const formatted = this.components.webScraper.formatWebPage(pageData);
+              additionalContext += `\n\n${formatted}\n`;
+            } catch (error) {
+              console.log(chalk.red(`  ✗ Web fetch failed: ${error.message}`));
+              additionalContext += `\n\nWEB FETCH FAILED for ${url}: ${error.message}\n`;
+            }
+          }
+        }
+
         // If we got additional context, do a follow-up query
         if (additionalContext) {
           const secondSpinner = ora('Processing additional context...').start();
@@ -737,11 +1002,37 @@ Add your custom instructions for the LLM here. This file works like Claude's CLA
 
           const followUpResponse = await this.components.lmstudioClient.complete(followUpPrompt.messages, {
             promptTokens: followUpPrompt.metadata.totalTokens,
+            onProgress: (tokens, text) => {
+              secondSpinner.text = `Generating response... (${tokens} tokens generated)`;
+            },
           });
           secondSpinner.stop();
 
-          // Parse the follow-up response
-          const finalParsed = this.components.responseParser.parseResponse(followUpResponse);
+          // Parse the follow-up response (handle both tool calls and content)
+          let finalParsed;
+          try {
+            if (followUpResponse.type === 'tool_calls') {
+              const { parseToolCalls, convertToolCallsToActions } = await import('./tools.js');
+              const toolCalls = parseToolCalls(followUpResponse);
+              const actions = convertToolCallsToActions(toolCalls);
+              finalParsed = {
+                plainText: followUpResponse.message.content || '',
+                searches: actions.searches,
+                readLines: actions.readLines,
+                fileEdits: actions.fileEdits,
+                fileCreates: actions.fileCreates,
+                fileDeletes: actions.fileDeletes,
+                taskUpdates: actions.taskUpdates
+              };
+            } else {
+              finalParsed = this.components.responseParser.parseResponse(followUpResponse.content);
+            }
+          } catch (error) {
+            console.error(chalk.red(`\n[ERROR] Failed to parse follow-up response: ${error.message}`));
+            // Fall back to XML parsing
+            const responseText = followUpResponse.content || followUpResponse.message?.content || '';
+            finalParsed = this.components.responseParser.parseResponse(responseText);
+          }
 
           // Display the final response
           console.log(chalk.cyan('\n'));
@@ -751,7 +1042,10 @@ Add your custom instructions for the LLM here. This file works like Claude's CLA
 
           // Use finalParsed for actions
           parsed = finalParsed;
-          currentResponse = followUpResponse;
+          // Extract text content from follow-up response
+          currentResponse = followUpResponse.type === 'content'
+            ? followUpResponse.content
+            : (followUpResponse.message?.content || '');
         }
       } else {
         // No requests, display response normally
@@ -778,7 +1072,15 @@ Add your custom instructions for the LLM here. This file works like Claude's CLA
       }
 
       // Ask to execute actions
-      if (this.components.responseParser.hasActions(currentResponse)) {
+      // Check if there are any actions in the parsed response (tool calls or XML)
+      const hasActions = (
+        parsed.fileEdits.length > 0 ||
+        parsed.fileCreates.length > 0 ||
+        parsed.fileDeletes.length > 0 ||
+        parsed.taskUpdates.length > 0
+      );
+
+      if (hasActions) {
         const { execute } = await inquirer.prompt([
           {
             type: 'confirm',
@@ -818,7 +1120,10 @@ Add your custom instructions for the LLM here. This file works like Claude's CLA
         const compressSpinner = ora(`Compressing history (${currentTokens}/${contextWindow} tokens)...`).start();
 
         await this.components.contextManager.compressHistory(
-          this.config.contextManagement.recentMessagesCount
+          this.config.contextManagement.recentMessagesCount,
+          (tokens, text) => {
+            compressSpinner.text = `Compressing history... (${tokens} tokens generated)`;
+          }
         );
 
         // Calculate new size after compression
@@ -832,8 +1137,20 @@ Add your custom instructions for the LLM here. This file works like Claude's CLA
       await this.saveState();
 
     } catch (error) {
-      spinner.fail('Error processing query');
-      console.error(chalk.red(error.message));
+      // Handle cancellation
+      if (error.name === 'CanceledError' || error.name === 'AbortError') {
+        spinner.stop();
+        // Clear the line to prevent display corruption
+        readline.clearLine(process.stdout, 0);
+        readline.cursorTo(process.stdout, 0);
+        console.log(chalk.yellow('✗ Request cancelled'));
+      } else {
+        spinner.fail('Error processing query');
+        console.error(chalk.red(error.message));
+      }
+    } finally {
+      // Always cleanup cancellation listener
+      if (cleanup) cleanup();
     }
 
     console.log(); // Empty line for spacing
@@ -921,11 +1238,30 @@ Add your custom instructions for the LLM here. This file works like Claude's CLA
           const spinner = ora('Generating focused edit...').start();
           const editResponse = await this.components.lmstudioClient.complete(editPrompt.messages, {
             promptTokens: editPrompt.metadata.totalTokens,
+            onProgress: (tokens, text) => {
+              spinner.text = `Generating focused edit... (${tokens} tokens generated)`;
+            },
           });
           spinner.stop();
 
-          // Parse the refined edit
-          const refinedParsed = this.components.responseParser.parseResponse(editResponse);
+          // Parse the refined edit (handle both tool calls and content)
+          let refinedParsed;
+          if (editResponse.type === 'tool_calls') {
+            const { parseToolCalls, convertToolCallsToActions } = await import('./tools.js');
+            const toolCalls = parseToolCalls(editResponse);
+            const actions = convertToolCallsToActions(toolCalls);
+            refinedParsed = {
+              plainText: editResponse.message.content || '',
+              searches: actions.searches,
+              readLines: actions.readLines,
+              fileEdits: actions.fileEdits,
+              fileCreates: actions.fileCreates,
+              fileDeletes: actions.fileDeletes,
+              taskUpdates: actions.taskUpdates
+            };
+          } else {
+            refinedParsed = this.components.responseParser.parseResponse(editResponse.content);
+          }
 
           if (refinedParsed.fileEdits.length > 0) {
             console.log(chalk.green(`✓ Generated refined edit with full file context`));
@@ -984,6 +1320,15 @@ Add your custom instructions for the LLM here. This file works like Claude's CLA
           console.error(chalk.red(`  Error: ${error.message}`));
           console.error(chalk.gray(`  Attempted path: ${edit.path}`));
           console.error(chalk.gray(`  Working directory: ${this.projectRoot}`));
+
+          // Show a preview of what we tried to match
+          if (edit.oldText && edit.oldText.length > 0) {
+            const preview = edit.oldText.length > 100
+              ? edit.oldText.substring(0, 100) + '...[truncated]'
+              : edit.oldText;
+            console.error(chalk.gray(`  Old text preview: ${JSON.stringify(preview)}`));
+          }
+
           throw error; // Re-throw to stop execution
         }
       }
@@ -1040,7 +1385,11 @@ Add your custom instructions for the LLM here. This file works like Claude's CLA
 
       spinner.succeed('Actions executed successfully');
     } catch (error) {
-      // Error already handled above with specific context
+      // Error already logged above with specific context
+      // Don't show success message if we caught an error
+      if (spinner.isSpinning) {
+        spinner.fail('Some actions failed');
+      }
     }
   }
 
@@ -1049,15 +1398,17 @@ Add your custom instructions for the LLM here. This file works like Claude's CLA
    */
   showHelp() {
     console.log(chalk.cyan('\n=== Available Commands ===\n'));
-    console.log(chalk.white('/help') + chalk.gray('     - Show this help message'));
-    console.log(chalk.white('/init') + chalk.gray('     - Index your codebase for context'));
-    console.log(chalk.white('/tasks') + chalk.gray('    - Show task list'));
-    console.log(chalk.white('/history') + chalk.gray('  - Show conversation history'));
-    console.log(chalk.white('/compress') + chalk.gray(' - Manually compress history'));
-    console.log(chalk.white('/config') + chalk.gray('   - Show current configuration'));
-    console.log(chalk.white('/stats') + chalk.gray('    - Show statistics'));
-    console.log(chalk.white('/clear') + chalk.gray('    - Clear conversation history'));
-    console.log(chalk.white('/exit') + chalk.gray('     - Exit application'));
+    console.log(chalk.white('/help') + chalk.gray('         - Show this help message'));
+    console.log(chalk.white('/init') + chalk.gray('         - Index your codebase for context'));
+    console.log(chalk.white('/context') + chalk.gray(' <n>  - Set context window size (e.g., /context 4096)'));
+    console.log(chalk.white('/tools') + chalk.gray(' <on|off> - Enable/disable function calling (e.g., /tools on)'));
+    console.log(chalk.white('/tasks') + chalk.gray('        - Show task list'));
+    console.log(chalk.white('/history') + chalk.gray('      - Show conversation history'));
+    console.log(chalk.white('/compress') + chalk.gray('     - Manually compress history'));
+    console.log(chalk.white('/config') + chalk.gray('       - Show current configuration'));
+    console.log(chalk.white('/stats') + chalk.gray('        - Show statistics'));
+    console.log(chalk.white('/clear') + chalk.gray('        - Clear conversation history'));
+    console.log(chalk.white('/exit') + chalk.gray('         - Exit application'));
     console.log();
   }
 
@@ -1126,7 +1477,10 @@ Add your custom instructions for the LLM here. This file works like Claude's CLA
 
     try {
       await this.components.contextManager.compressHistory(
-        this.config.contextManagement.recentMessagesCount
+        this.config.contextManagement.recentMessagesCount,
+        (tokens, text) => {
+          spinner.text = `Compressing conversation history... (${tokens} tokens generated)`;
+        }
       );
       await this.components.contextManager.saveHistory();
 
@@ -1151,11 +1505,14 @@ Add your custom instructions for the LLM here. This file works like Claude's CLA
     console.log(chalk.gray(`  Base URL: ${this.config.lmstudio.baseURL}`));
     console.log(chalk.gray(`  Model: ${this.config.lmstudio.model}`));
     console.log(chalk.gray(`  Temperature: ${this.config.lmstudio.temperature}`));
-    console.log(chalk.gray(`  Max Response Tokens: ${this.config.lmstudio.maxTokens}`));
 
     const contextWindow = this.components.lmstudioClient.getContextWindow();
     console.log(chalk.white('\nContext Management:'));
-    console.log(chalk.gray(`  Model Context Window: ${contextWindow} tokens (from API)`));
+    if (contextWindow) {
+      console.log(chalk.gray(`  Model Context Window: ${contextWindow} tokens`));
+    } else {
+      console.log(chalk.gray(`  Model Context Window: Not set (use /context command)`));
+    }
     console.log(chalk.gray(`  Compression Threshold: ${this.config.contextManagement.compressionThreshold * 100}%`));
     console.log(chalk.gray(`  Recent Messages Count: ${this.config.contextManagement.recentMessagesCount}`));
 
@@ -1169,6 +1526,70 @@ Add your custom instructions for the LLM here. This file works like Claude's CLA
     }
 
     console.log();
+  }
+
+  /**
+   * Set context length manually
+   */
+  async setContextLength(args) {
+    if (args.length === 0) {
+      const currentContext = this.components.lmstudioClient.getContextWindow();
+      if (currentContext) {
+        console.log(chalk.white(`\nCurrent context window: ${currentContext} tokens`));
+      } else {
+        console.log(chalk.yellow('\nContext window not set'));
+      }
+      console.log(chalk.gray('Usage: /context <number>'));
+      console.log(chalk.gray('Example: /context 4096\n'));
+      return;
+    }
+
+    const contextValue = parseInt(args[0], 10);
+
+    if (isNaN(contextValue) || contextValue <= 0) {
+      console.log(chalk.red('Error: Context length must be a positive number'));
+      return;
+    }
+
+    if (contextValue < 512) {
+      console.log(chalk.yellow('Warning: Context length seems very small (< 512 tokens)'));
+      console.log(chalk.gray('Are you sure this is correct?\n'));
+    }
+
+    // Update LMStudio client (session only, not saved)
+    this.components.lmstudioClient.contextWindow = contextValue;
+
+    console.log(chalk.green(`✓ Context window set to ${contextValue} tokens for this session\n`));
+  }
+
+  /**
+   * Toggle tool support on/off
+   */
+  async toggleTools(args) {
+    if (args.length === 0) {
+      const status = this.components.lmstudioClient.supportsTools;
+      console.log(chalk.white(`\nTool support: ${status ? chalk.green('ENABLED (Function Calling)') : chalk.yellow('DISABLED (XML mode)')}`));
+      console.log(chalk.gray('\nUsage: /tools on  or  /tools off'));
+      console.log(chalk.gray('When enabled, model uses function calling instead of XML tags'));
+      console.log(chalk.gray('\nNote: Tool support is auto-detected at startup with a test call.\n'));
+      return;
+    }
+
+    const action = args[0].toLowerCase();
+
+    if (action === 'on' || action === 'enable' || action === '1' || action === 'true') {
+      this.components.lmstudioClient.supportsTools = true;
+      console.log(chalk.green('\n✓ Tool support ENABLED for this session'));
+      console.log(chalk.gray('The model will use function calling instead of XML tags'));
+      console.log(chalk.yellow('\nWarning: If tool calling was auto-disabled, it may not work properly.\n'));
+    } else if (action === 'off' || action === 'disable' || action === '0' || action === 'false') {
+      this.components.lmstudioClient.supportsTools = false;
+      console.log(chalk.yellow('\n✓ Tool support DISABLED for this session'));
+      console.log(chalk.gray('The model will use XML tags for actions\n'));
+    } else {
+      console.log(chalk.red('\nError: Invalid argument'));
+      console.log(chalk.gray('Usage: /tools on  or  /tools off\n'));
+    }
   }
 
   /**

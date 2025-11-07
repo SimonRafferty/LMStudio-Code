@@ -13,6 +13,8 @@ class ResponseParser {
       question: /<question>([\s\S]*?)<\/question>/gi,
       search: /<search>([\s\S]*?)<\/search>/gi,
       readLines: /<read_lines>\s*<path>(.*?)<\/path>\s*<start>(.*?)<\/start>\s*<end>(.*?)<\/end>\s*<\/read_lines>/gi,
+      webSearch: /<web_search>([\s\S]*?)<\/web_search>/gi,
+      webFetch: /<web_fetch>([\s\S]*?)<\/web_fetch>/gi,
     };
   }
 
@@ -31,6 +33,8 @@ class ResponseParser {
       questions: this.extractQuestions(responseText),
       searches: this.extractSearches(responseText),
       readLines: this.extractReadLines(responseText),
+      webSearches: this.extractWebSearches(responseText),
+      webFetches: this.extractWebFetches(responseText),
       plainText: this._extractPlainText(responseText),
     };
   }
@@ -62,12 +66,16 @@ class ResponseParser {
 
     let match;
     while ((match = pattern.exec(responseText)) !== null) {
+      // Strip only leading/trailing newlines (not spaces/tabs - indentation matters!)
+      const oldText = match[3].replace(/^\n+/, '').replace(/\n+$/, '');
+      const newText = match[4].replace(/^\n+/, '').replace(/\n+$/, '');
+
       edits.push({
         type: 'edit',
         path: this.cleanPath(match[1]),
         operation: match[2].trim(),
-        oldText: match[3].trim(),
-        newText: match[4].trim(),
+        oldText: oldText,
+        newText: newText,
       });
     }
 
@@ -86,10 +94,13 @@ class ResponseParser {
 
     let match;
     while ((match = pattern.exec(responseText)) !== null) {
+      // Strip only leading/trailing newlines (not spaces/tabs - indentation matters!)
+      const content = match[2].replace(/^\n+/, '').replace(/\n+$/, '');
+
       creates.push({
         type: 'create',
         path: this.cleanPath(match[1]),
-        content: match[2].trim(),
+        content: content,
       });
     }
 
@@ -245,6 +256,48 @@ class ResponseParser {
   }
 
   /**
+   * Extract web search requests from response
+   * @param {string} responseText - Raw response text
+   * @returns {Array<string>} - Array of search queries
+   */
+  extractWebSearches(responseText) {
+    const searches = [];
+    const pattern = this.patterns.webSearch;
+    pattern.lastIndex = 0;
+
+    let match;
+    while ((match = pattern.exec(responseText)) !== null) {
+      const query = match[1].trim();
+      if (query.length > 0) {
+        searches.push(query);
+      }
+    }
+
+    return searches;
+  }
+
+  /**
+   * Extract web fetch requests from response
+   * @param {string} responseText - Raw response text
+   * @returns {Array<string>} - Array of URLs to fetch
+   */
+  extractWebFetches(responseText) {
+    const fetches = [];
+    const pattern = this.patterns.webFetch;
+    pattern.lastIndex = 0;
+
+    let match;
+    while ((match = pattern.exec(responseText)) !== null) {
+      const url = match[1].trim();
+      if (url.length > 0) {
+        fetches.push(url);
+      }
+    }
+
+    return fetches;
+  }
+
+  /**
    * Extract plain text (remove all XML tags)
    * @param {string} responseText - Raw response text
    * @returns {string} - Plain text
@@ -260,6 +313,8 @@ class ResponseParser {
     plainText = plainText.replace(/<task_update>[\s\S]*?<\/task_update>/gi, '');
     plainText = plainText.replace(/<question>[\s\S]*?<\/question>/gi, '');
     plainText = plainText.replace(/<read_lines>[\s\S]*?<\/read_lines>/gi, '');
+    plainText = plainText.replace(/<web_search>[\s\S]*?<\/web_search>/gi, '');
+    plainText = plainText.replace(/<web_fetch>[\s\S]*?<\/web_fetch>/gi, '');
 
     // Remove any remaining tags
     plainText = plainText.replace(/<[^>]+>/g, '');
