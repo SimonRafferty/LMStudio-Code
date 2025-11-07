@@ -384,8 +384,8 @@ Add your custom instructions for the LLM here. This file works like Claude's CLA
    */
   async customInput(prompt, options = {}) {
     return new Promise((resolve, reject) => {
-      let input = '';
-      let cursorPos = 0; // Position in the input string
+      let input = options.defaultValue || '';
+      let cursorPos = input.length; // Position in the input string (start at end if pre-populated)
       const promptLength = prompt.replace(/\x1b\[[0-9;]*m/g, '').length; // Strip ANSI codes for length
       const terminalWidth = process.stdout.columns || 80;
       let currentNumLines = 1; // Track current number of lines being used
@@ -396,8 +396,14 @@ Add your custom instructions for the LLM here. This file works like Claude's CLA
         process.stdout.write(separator + '\n');
       }
 
-      // Display the prompt
-      process.stdout.write(prompt);
+      // Display the prompt and pre-populated value
+      process.stdout.write(prompt + input);
+
+      // Calculate initial number of lines if pre-populated
+      if (input.length > 0) {
+        const totalLength = promptLength + input.length;
+        currentNumLines = Math.max(1, Math.ceil(totalLength / terminalWidth));
+      }
 
       // Enable raw mode for character-by-character input
       if (process.stdin.isTTY) {
@@ -566,21 +572,34 @@ Add your custom instructions for the LLM here. This file works like Claude's CLA
 
     // Check connection
     const connectionStatus = await this.testConnection();
+    let needContextPrompt = false;
+
     if (connectionStatus === false) {
       console.log(chalk.yellow('\nContinuing anyway (you can still use local commands)...\n'));
     } else if (connectionStatus === 'no-context') {
-      // Context window not available - block prompts until set
-      console.log(chalk.yellow('LLM queries are blocked until context length is set.\n'));
+      // Context not detected - will prompt user on first input
+      needContextPrompt = true;
     } else {
-      // Check if context needs compression on startup
+      // Context detected successfully
       await this.checkAndCompressContext();
     }
 
     // Main interaction loop
+    let firstPrompt = true;
     while (true) {
       let input;
+      const inputOptions = {};
+
+      // First prompt shows /context command if context wasn't auto-detected
+      if (firstPrompt && needContextPrompt) {
+        const currentContext = this.components.lmstudioClient.getContextWindow();
+        const lastContext = currentContext || this.config.lmstudio.lastContextWindow || 32768;
+        inputOptions.defaultValue = `/context ${lastContext}`;
+        firstPrompt = false;
+      }
+
       try {
-        input = await this.customInput(chalk.green('You: '));
+        input = await this.customInput(chalk.green('You: '), inputOptions);
       } catch (error) {
         if (error.message === 'INPUT_CANCELLED') {
           // User pressed ESC - cancel any ongoing request
@@ -607,8 +626,7 @@ Add your custom instructions for the LLM here. This file works like Claude's CLA
       // Block prompts if context not set
       const contextWindow = this.components.lmstudioClient.getContextWindow();
       if (!contextWindow) {
-        console.log(chalk.red('\n✗ Context window not set. Please use /context command first.\n'));
-        console.log(chalk.gray('Example: /context 4096\n'));
+        console.log(chalk.red('\n✗ Context window not set. Please set context first.\n'));
         continue;
       }
 
@@ -1564,22 +1582,30 @@ Add your custom instructions for the LLM here. This file works like Claude's CLA
       return;
     }
 
-    const contextValue = parseInt(args[0], 10);
+    const MIN_CONTEXT = 2048;
+    let contextValue = parseInt(args[0], 10);
 
     if (isNaN(contextValue) || contextValue <= 0) {
       console.log(chalk.red('Error: Context length must be a positive number'));
       return;
     }
 
-    if (contextValue < 512) {
-      console.log(chalk.yellow('Warning: Context length seems very small (< 512 tokens)'));
-      console.log(chalk.gray('Are you sure this is correct?\n'));
+    // Enforce minimum context length
+    if (contextValue < MIN_CONTEXT) {
+      console.log(chalk.yellow(`Context length too small (${contextValue} tokens)`));
+      console.log(chalk.yellow(`Setting to minimum: ${MIN_CONTEXT} tokens\n`));
+      contextValue = MIN_CONTEXT;
     }
 
-    // Update LMStudio client (session only, not saved)
+    // Update LMStudio client
     this.components.lmstudioClient.contextWindow = contextValue;
 
-    console.log(chalk.green(`✓ Context window set to ${contextValue} tokens for this session\n`));
+    // Save to config for next session
+    this.config.lmstudio.lastContextWindow = contextValue;
+    const configPath = path.join(this.lmcodeDir, 'config.json');
+    await fs.writeFile(configPath, JSON.stringify(this.config, null, 2));
+
+    console.log(chalk.green(`✓ Context window set to ${contextValue} tokens\n`));
   }
 
   /**
