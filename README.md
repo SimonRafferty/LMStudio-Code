@@ -2,7 +2,7 @@
 
 **AI-Powered Coding Assistant with Intelligent Context Management**
 
-Command-line coding assistant for LM Studio (or any OpenAI-compatible API). Features intelligent context management, dual-track processing, web search, and a modern CLI interface optimized for token limits.
+Command-line coding assistant for LM Studio (or any OpenAI-compatible API). Features intelligent context management, dual-track processing, web search, and a modern CLI interface optimized for token limits, based on the (fantastic) Claude Code UI.
 
 ## Key Features
 
