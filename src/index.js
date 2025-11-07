@@ -1085,15 +1085,22 @@ Add your custom instructions for the LLM here. This file works like Claude's CLA
       }
 
       // Ask to execute actions
-      // Check if there are any actions in the parsed response (tool calls or XML)
-      const hasActions = (
+      // Check if there are file operations that need confirmation
+      const hasFileOperations = (
         parsed.fileEdits.length > 0 ||
         parsed.fileCreates.length > 0 ||
-        parsed.fileDeletes.length > 0 ||
-        parsed.taskUpdates.length > 0
+        parsed.fileDeletes.length > 0
       );
 
-      if (hasActions) {
+      // Task updates are just metadata - execute them silently
+      if (parsed.taskUpdates.length > 0) {
+        for (const task of parsed.taskUpdates) {
+          this.components.taskManager.updateTask(task.description, task.status);
+        }
+      }
+
+      // Only prompt for file operations
+      if (hasFileOperations) {
         const { execute } = await inquirer.prompt([
           {
             type: 'confirm',
